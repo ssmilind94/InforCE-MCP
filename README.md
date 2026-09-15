@@ -1,27 +1,71 @@
-# Infor LN MCP Server
+# Infor LN MCP Server (InforCE-MCP)
 
-MCP server (streamable HTTP) exposing Infor LN OData APIs from the ION API gateway, protected by OAuth2
-with internally issued client IDs/secrets. Built for Azure Web Apps.
+MCP server (streamable HTTP) that exposes Infor LN OData APIs from the Infor ION API gateway to AI agents.
+Clients authenticate with a **bearer token**: either a static token for custom agents, or an OAuth2 access token.
+It runs on an Azure Web App and deploys from GitHub Actions.
 
 ```
-MCP client ──OAuth2 bearer──▶ /mcp (this server) ──service account token──▶ ION API ──▶ LN OData
+AI agent / MCP client ──Bearer token──▶ /mcp (this server) ──ION service account token──▶ ION API ──▶ LN OData
 ```
 
-## Layout
+## Current deployment
 
-| Path | Purpose |
+| | |
 |---|---|
-| `config/endpoints.yaml` | Enabled LN services, resources, operations and permissions |
-| `app/main.py` | ASGI app factory: `/mcp`, OAuth2 endpoints, `/healthz` |
-| `app/tools.py` | MCP tools |
-| `app/infor/` | ION API credentials, token cache, HTTP client with retries, `$metadata` parsing, LN operations |
-| `app/security/oauth.py` | OAuth2 authorization server (JWT access/refresh tokens) |
-| `app/security/static_tokens.py` | Static bearer tokens for custom agents |
-| `scripts/check_connectivity.py` | Phase 1 connectivity check |
-| `scripts/discover_ln.py` | Probe LN services and write `discovery/ln_endpoint_inventory.*` |
-| `scripts/manage_clients.py` | Create/list/delete MCP OAuth clients |
-| `scripts/manage_tokens.py` | Create/list/revoke static bearer tokens |
-| `scripts/smoke_test.py` | Live read-only end-to-end test through a real MCP client |
+| MCP endpoint | `https://inforce-mcp-gxeybyepgcbvcham.centralindia-01.azurewebsites.net/mcp` |
+| Health check | `https://inforce-mcp-gxeybyepgcbvcham.centralindia-01.azurewebsites.net/healthz` |
+| Azure | Web App `inforce-mcp` (Linux, Python 3.14), resource group `RG-InforVelocity`, Central India |
+| Infor | LN DEV tenant via ION API; tested with company `1300` |
+| CI/CD | `.github/workflows/deploy.yml`: tests, then deploy on push to `main` |
+| Default company | Not set yet (`__LN_COMPANY__`): pass `company` on every call |
+
+Verified live: the read-only smoke test passes 40/40 with a static token and with OAuth2 client credentials.
+Create, update, delete and actions are only covered by the mocked tests so far.
+
+## Connecting an agent
+
+1. Get a bearer token from the server admin (see [Static bearer tokens](#static-bearer-tokens)).
+2. Send it on every request: `Authorization: Bearer lnmcp_<id>_<secret>`.
+3. Start with `ln_list_resources`, then `ln_describe`, then query or write.
+
+Python (MCP SDK):
+
+```python
+import asyncio
+import os
+
+import httpx2
+from mcp import ClientSession
+from mcp.client.streamable_http import streamable_http_client
+
+MCP_URL = "https://inforce-mcp-gxeybyepgcbvcham.centralindia-01.azurewebsites.net/mcp"
+
+
+async def main() -> None:
+    headers = {"Authorization": f"Bearer {os.environ['MCP_BEARER_TOKEN']}"}
+    async with httpx2.AsyncClient(headers=headers, timeout=180) as http:
+        async with streamable_http_client(MCP_URL, http_client=http) as (read, write):
+            async with ClientSession(read, write) as session:
+                await session.initialize()
+                result = await session.call_tool("ln_query", {
+                    "service": "tcapi.ibdItem", "resource": "Items", "select": "Item,Description", "top": 5,
+                    "company": "1300"})
+                print(result.content[0].text)  # JSON text; result.is_error is True on failures
+
+
+asyncio.run(main())
+```
+
+curl (raw JSON-RPC):
+
+```bash
+curl -s https://inforce-mcp-gxeybyepgcbvcham.centralindia-01.azurewebsites.net/mcp \
+  -H "Authorization: Bearer $MCP_BEARER_TOKEN" \
+  -H "Accept: application/json, text/event-stream" -H "Content-Type: application/json" \
+  -d '{"jsonrpc":"2.0","id":1,"method":"tools/call","params":{"name":"ln_list_resources","arguments":{}}}'
+```
+
+Keep tokens in a secret store or environment variable, never in source code.
 
 ## MCP tools
 
@@ -36,85 +80,23 @@ MCP client ──OAuth2 bearer──▶ /mcp (this server) ──service account
 | `ln_delete` | ln.write | DELETE a record |
 | `ln_call_operation` | ln.read (functions) / ln.write (actions) | e.g. `CreateOrder`, `CreateLine`, `GetSegmentedItemKey` |
 
-Every data call needs an LN company: the `company` argument, or `LN_DEFAULT_COMPANY`
-(placeholder `__LN_COMPANY__` until decided; calls without a company fail with a clear message).
+Every data call needs an LN company: the `company` argument, or `LN_DEFAULT_COMPANY`. Until a default is
+configured, a call without a company fails with a clear message.
 
-### Permissions (`permissions: max`)
+### Enabled endpoints and permissions (`permissions: max`)
 
 LN declares a level per entity; the server allows exactly that and never more:
 
-| Resource | LN level | Allowed |
-|---|---|---|
-| slsSalesOrder `Orders`, `Lines` | Updatable | read, create, update (most fields are read-only; create via `CreateOrder` / `CreateLine`) |
-| slsSalesOrder `ActualDeliveryLines` | ReadableByKey | read |
-| isaItemSales `ItemsSales`, `ItemsSalesBySalesOffice` | Deletable | read, create, update, delete |
-| comBusinessPartner `BusinessPartners`, `SoldtoBusinessPartners` | Deletable | read, create, update, delete |
-| ibdItem `Items`, `ItemsBySites` | Deletable | read, create, update, delete |
+| Service | Resource | LN level | Allowed |
+|---|---|---|---|
+| `tdapi.slsSalesOrder` | `Orders`, `Lines` | Updatable | read, create, update (most fields are read-only; create via `CreateOrder` / `CreateLine`) |
+| `tdapi.slsSalesOrder` | `ActualDeliveryLines` | ReadableByKey | read |
+| `tdapi.isaItemSales` | `ItemsSales`, `ItemsSalesBySalesOffice` | Deletable | read, create, update, delete |
+| `tcapi.comBusinessPartner` | `BusinessPartners`, `SoldtoBusinessPartners` | Deletable | read, create, update, delete |
+| `tcapi.ibdItem` | `Items`, `ItemsBySites` | Deletable | read, create, update, delete |
 
-## Adding an API
-
-1. Find the service: `python scripts/discover_ln.py --services <service>` (or the ION API Gateway portal documentation).
-2. Add it to `config/endpoints.yaml` with its resources/operations (optionally `permissions: [read]`).
-3. Restart. No code changes are needed.
-
-## Local development
-
-```bash
-python3 -m venv .venv && .venv/bin/pip install -r requirements-dev.txt
-cp .env.example .env
-.venv/bin/python scripts/manage_clients.py jwt-secret        # put into OAUTH_JWT_SECRET
-.venv/bin/python scripts/manage_clients.py create --name "my-client" \
-    [--redirect-uri https://claude.ai/api/mcp/auth_callback]   # redirect URI only for interactive clients
-.venv/bin/uvicorn app.main:create_app --factory --port 8000
-```
-
-Tests:
-
-```bash
-.venv/bin/python -m pytest                                   # unit + in-process OAuth/MCP tests (Infor mocked)
-.venv/bin/python scripts/smoke_test.py --client-id ... --client-secret ... --company 1300   # live, read-only
-```
-
-## Azure deployment (GitHub Actions → Linux Python 3.14 Web App)
-
-`.github/workflows/deploy.yml` runs the tests on every push and PR. On `main` it zip-deploys `app/`,
-`config/endpoints.yaml` and `requirements.txt`; App Service installs the requirements. The workflow then
-polls `/healthz`. The deploy job is skipped until `AZURE_WEBAPP_NAME` is set.
-
-One-time setup:
-
-1. **Web App** (Portal > Settings > Configuration > General settings)
-   - Startup command:
-     `python -m uvicorn app.main:create_app --factory --host 0.0.0.0 --port 8000 --proxy-headers --forwarded-allow-ips="*"`
-   - SCM Basic Auth Publishing Credentials: **On** (needed for the publish profile)
-   - HTTPS Only: **On**. Always On: **On**.
-2. **OAuth clients for Azure.** Keep them separate from local clients; `config/clients*.json` is git-ignored:
-   ```bash
-   .venv/bin/python scripts/manage_clients.py --file config/clients.azure.json create --name "my-client" \
-       [--redirect-uri https://claude.ai/api/mcp/auth_callback]
-   ```
-3. **App Settings:**
-   ```bash
-   .venv/bin/python scripts/make_app_settings.py --app-url https://<app>.azurewebsites.net [--company <LN company>]
-   ```
-   Paste the entries from `output/azure-appsettings.json` into Portal > Settings > Environment variables >
-   Advanced edit, merging with what is already there, then Apply. The file holds secrets and has mode 0600.
-   Reruns keep `OAUTH_JWT_SECRET`; `--rotate-jwt-secret` invalidates all issued tokens.
-4. **GitHub** (Settings > Secrets and variables > Actions)
-   - Variable `AZURE_WEBAPP_NAME` = `<app>`
-   - Variable `AZURE_WEBAPP_URL` = the app's `https://` default domain from the Overview page. New apps can have
-     a unique hostname such as `<app>-<hash>.<region>.azurewebsites.net`; use the same URL for `--app-url`.
-   - Secret `AZURE_WEBAPP_PUBLISH_PROFILE` = contents of Portal > Overview > Download publish profile
-5. Push to `main`, or run the workflow manually. Then verify:
-   `.venv/bin/python scripts/smoke_test.py --base-url https://<app>.azurewebsites.net --client-id ... --client-secret ... --company <LN company>`
-
-Adding an API or a client changes something different:
-- New API: edit `config/endpoints.yaml` and push. The deploy restarts the app.
-- New client: rerun steps 2 and 3, then update `OAUTH_CLIENTS_JSON` in the Portal.
-
-Tokens are stateless JWTs, so the app can scale out. One exception: single use of an authorization code is
-enforced per instance, in memory. With several instances, a code could be redeemed once on each instance
-during its 5-minute lifetime. It stays bound to the client secret and PKCE either way.
+Operations: `CreateOrder`, `CreateLine`, `SimulateAdditionalCostLines`, `CalculateLineAmounts`
+(`tdapi.slsSalesOrder`) and `GetSegmentedItemKey` (`tcapi.ibdItem`).
 
 ## Authentication
 
@@ -123,9 +105,10 @@ during its 5-minute lifetime. It stays bound to the client secret and PKCE eithe
 | Token | For | Obtained |
 |---|---|---|
 | Static token `lnmcp_<id>_<secret>` | Custom agents and scripts with a fixed header | `scripts/manage_tokens.py` |
-| OAuth2 JWT access token | OAuth-capable MCP clients | `POST /oauth/token` (see below) |
+| OAuth2 JWT access token | OAuth-capable MCP clients | `POST /oauth/token` |
 
 Both kinds use the same scopes: `ln.read` for any access, `ln.write` for create, update, delete and actions.
+Missing, invalid, expired or revoked tokens get `401`.
 
 ### Static bearer tokens
 
@@ -136,53 +119,126 @@ Both kinds use the same scopes: `ln.read` for any access, `ln.write` for create,
 .venv/bin/python scripts/manage_tokens.py --file config/tokens.azure.json revoke <token_id>
 ```
 
-- Each token is shown once. Only its SHA-256 hash is stored.
-- Locally the server reads `config/tokens.json`. On Azure, rerun `scripts/make_app_settings.py` and apply the
-  `STATIC_TOKENS_JSON` setting. Changing the setting restarts the app, and that's when creating or revoking a
-  token takes effect.
+- Each token is shown once. Only its SHA-256 hash is stored, in a git-ignored registry file.
+- Locally the server reads `config/tokens.json`. On Azure the registry is the `STATIC_TOKENS_JSON` App Setting:
+  after creating or revoking a token, [update the App Settings](#app-settings). The app restarts, and the
+  change takes effect then.
+- Use one token per agent, so you can revoke one without affecting the others. Give read-only agents
+  `--scopes ln.read`.
 
-Custom agent example (Python MCP SDK):
-
-```python
-import os
-
-import httpx2
-from mcp import ClientSession
-from mcp.client.streamable_http import streamable_http_client
-
-headers = {"Authorization": f"Bearer {os.environ['MCP_BEARER_TOKEN']}"}
-async with httpx2.AsyncClient(headers=headers, timeout=180) as http:
-    async with streamable_http_client("https://<app host>/mcp", http_client=http) as (read, write):
-        async with ClientSession(read, write) as session:
-            await session.initialize()
-            result = await session.call_tool("ln_query", {
-                "service": "tcapi.ibdItem", "resource": "Items", "select": "Item,Description", "top": 5,
-                "company": "1300"})
-```
-
-Keep tokens in a secret store or environment variable, not in source code. Use a separate token for each
-agent so you can revoke one without affecting the others.
-
-## OAuth2
+### OAuth2
 
 - Metadata: `/.well-known/oauth-authorization-server`, `/.well-known/oauth-protected-resource/mcp`
 - Token: `POST /oauth/token` with `client_credentials`, `authorization_code` (PKCE S256), `refresh_token`;
   client auth via HTTP Basic or form fields.
 - Authorize: `GET /oauth/authorize` (auto-approved for registered clients and exact registered redirect URIs).
-- Scopes: `ln.read` (required for `/mcp`), `ln.write` (create/update/delete/actions).
+- Clients: `scripts/manage_clients.py --file config/clients.azure.json create --name ... [--scopes ...] [--redirect-uri ...]`
+  (redirect URIs only for interactive clients, e.g. `https://claude.ai/api/mcp/auth_callback`).
 - Tokens are HS256 JWTs signed with `OAUTH_JWT_SECRET`; client secrets are stored as PBKDF2 hashes.
+- Tokens are stateless, so the app can scale out. One exception: single use of an authorization code is enforced
+  per instance, in memory. With several instances, a code could be redeemed once on each instance during its
+  5-minute lifetime. It stays bound to the client secret and PKCE either way.
+
+## Adding an API
+
+1. Find the service: `python scripts/discover_ln.py --services <service>` (or the ION API Gateway portal documentation).
+2. Add it to `config/endpoints.yaml` with its resources/operations (optionally `permissions: [read]`).
+3. Push to `main`. The workflow tests and redeploys. No code changes are needed.
+
+## Layout
+
+| Path | Purpose |
+|---|---|
+| `config/endpoints.yaml` | Enabled LN services, resources, operations and permissions |
+| `app/main.py` | ASGI app factory: `/mcp`, OAuth2 endpoints, `/healthz` |
+| `app/tools.py` | MCP tools |
+| `app/infor/` | ION API credentials, token cache, HTTP client with retries, `$metadata` parsing, LN operations |
+| `app/security/oauth.py` | OAuth2 authorization server (JWT access/refresh tokens) |
+| `app/security/static_tokens.py` | Static bearer tokens for custom agents |
+| `scripts/check_connectivity.py` | ION API connectivity check |
+| `scripts/discover_ln.py` | Probe LN services and write `discovery/ln_endpoint_inventory.*` |
+| `scripts/manage_clients.py` | Create/list/delete MCP OAuth clients |
+| `scripts/manage_tokens.py` | Create/list/revoke static bearer tokens |
+| `scripts/make_app_settings.py` | Build the Azure App Settings JSON (credentials, clients, tokens) |
+| `scripts/smoke_test.py` | Live read-only end-to-end test through a real MCP client |
+| `.github/workflows/deploy.yml` | Test and deploy workflow |
+
+Never committed (git-ignored): `Files/` (`.ionapi`, Azure and client credentials), `.env`, `config/clients*.json`,
+`config/tokens*.json`, `output/`.
+
+## Local development
+
+```bash
+python3 -m venv .venv && .venv/bin/pip install -r requirements-dev.txt
+cp .env.example .env
+.venv/bin/python scripts/manage_clients.py jwt-secret        # put into OAUTH_JWT_SECRET
+.venv/bin/python scripts/manage_tokens.py create --name "local-agent"          # static token (config/tokens.json)
+.venv/bin/python scripts/manage_clients.py create --name "my-client"          # optional OAuth2 client
+.venv/bin/uvicorn app.main:create_app --factory --port 8000
+```
+
+Tests:
+
+```bash
+.venv/bin/python -m pytest          # unit + in-process OAuth/static-token/MCP tests (Infor mocked)
+MCP_BEARER_TOKEN=lnmcp_... .venv/bin/python scripts/smoke_test.py --base-url <url> --company 1300   # live, read-only
+.venv/bin/python scripts/smoke_test.py --base-url <url> --client-id ... --client-secret ... --company 1300
+```
+
+## Azure deployment
+
+`.github/workflows/deploy.yml` runs the tests on every push and PR. On `main` it zip-deploys `app/`,
+`config/endpoints.yaml` and `requirements.txt`; App Service installs the requirements. The workflow then
+polls `/healthz`. The deploy job is skipped until `AZURE_WEBAPP_NAME` is set.
+
+### One-time setup
+
+1. **Web App** (Linux, Python 3.14), under Configuration > General settings:
+   - Startup command:
+     `python -m uvicorn app.main:create_app --factory --host 0.0.0.0 --port 8000 --proxy-headers --forwarded-allow-ips="*"`
+   - SCM Basic Auth Publishing Credentials: **On** (needed for the publish profile)
+   - HTTPS Only: **On**. Always On: **On**.
+2. **Clients and tokens for Azure.** Keep them separate from local ones:
+   `manage_clients.py --file config/clients.azure.json ...` and `manage_tokens.py --file config/tokens.azure.json ...`
+3. **App Settings.** See [below](#app-settings).
+4. **GitHub** (Settings > Secrets and variables > Actions)
+   - Variable `AZURE_WEBAPP_NAME` = `<app>`
+   - Variable `AZURE_WEBAPP_URL` = the app's `https://` default domain from the Overview page. New apps can have
+     a unique hostname such as `<app>-<hash>.<region>.azurewebsites.net`.
+   - Secret `AZURE_WEBAPP_PUBLISH_PROFILE` = the publish profile (Portal > Overview > Download publish profile)
+5. Push to `main`, or run `gh workflow run test-and-deploy`. Then run the smoke test against the app URL.
+
+### App Settings
+
+```bash
+.venv/bin/python scripts/make_app_settings.py --app-url https://<app host> \
+    [--clients config/clients.azure.json] [--tokens config/tokens.azure.json] [--company <LN company>]
+```
+
+This writes `output/azure-appsettings.json` with mode 0600: `IONAPI_JSON`, `OAUTH_JWT_SECRET`,
+`OAUTH_CLIENTS_JSON`, `STATIC_TOKENS_JSON`, `PUBLIC_BASE_URL`, `LN_DEFAULT_COMPANY`,
+`SCM_DO_BUILD_DURING_DEPLOYMENT`. Apply it one of two ways:
+
+- Azure CLI:
+  `az webapp config appsettings set -g <rg> -n <app> --settings @output/azure-appsettings.json -o none`
+- Portal: Environment variables > Advanced edit. Merge the entries, then Apply.
+
+Reruns keep `OAUTH_JWT_SECRET`; `--rotate-jwt-secret` invalidates every issued OAuth2 token.
+
+The CLI route used for this deployment signs in as a service principal with the **Website Contributor** role on
+the Web App only. Its credentials stay in `Files/azure-sp.env`.
 
 ## Configuration
 
 | Variable | Default | Notes |
 |---|---|---|
-| `IONAPI_JSON` / `IONAPI_FILE` | `Files/InforVelocity.ionapi` | Backend service account `.ionapi`; on Azure the file content goes in the `IONAPI_JSON` App Setting |
+| `IONAPI_JSON` / `IONAPI_FILE` | `Files/InforVelocity.ionapi` | Backend service account `.ionapi`; on Azure the file content goes in `IONAPI_JSON` |
 | `LN_DEFAULT_COMPANY` | `__LN_COMPANY__` | Default `X-Infor-LnCompany` |
 | `ENDPOINTS_FILE` | `config/endpoints.yaml` | |
 | `PUBLIC_BASE_URL` | `http://localhost:8000` | Public URL; OAuth issuer and token audience |
-| `ALLOWED_HOSTS` | `[]` | Extra accepted Host headers (JSON list) |
+| `ALLOWED_HOSTS` | `[]` | Extra accepted Host headers (JSON list), e.g. for a custom domain |
 | `OAUTH_JWT_SECRET` | (required) | At least 32 characters |
-| `OAUTH_CLIENTS_JSON` / `OAUTH_CLIENTS_FILE` | `config/clients.json` | Client registry |
+| `OAUTH_CLIENTS_JSON` / `OAUTH_CLIENTS_FILE` | `config/clients.json` | OAuth2 client registry (hashes) |
 | `STATIC_TOKENS_JSON` / `STATIC_TOKENS_FILE` | `config/tokens.json` | Static bearer token registry (hashes) |
 | `OAUTH_ACCESS_TOKEN_TTL` / `OAUTH_REFRESH_TOKEN_TTL` | 3600 / 2592000 | Seconds |
 | `INFOR_MAX_RETRIES`, `INFOR_TIMEOUT_SECONDS`, `QUERY_MAX_TOP` | 3, 60, 500 | |
