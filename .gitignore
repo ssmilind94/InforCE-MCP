@@ -1,0 +1,17 @@
+# Secrets - never commit
+Files/
+*.ionapi
+.env
+.env.*
+
+# Python
+__pycache__/
+*.pyc
+.venv/
+.pytest_cache/
+
+# Raw discovery output (regenerable)
+output/
+
+# OAuth client registry (hashed secrets, still environment-specific)
+config/clients.json

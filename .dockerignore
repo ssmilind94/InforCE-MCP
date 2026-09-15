@@ -1,0 +1,10 @@
+.git
+.venv
+.env
+Files/
+output/
+discovery/
+tests/
+scripts/
+config/clients.json
+**/__pycache__

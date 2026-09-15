@@ -1,0 +1,45 @@
+# LN OData endpoints exposed through the MCP server.
+#
+# To add an API: add the service (and its resources/operations) below and restart.
+# Find names with: python scripts/discover_ln.py --services <service>
+#
+# permissions:
+#   max                        -> everything LN metadata declares for the resource
+#                                 (ReadableByKey=read, Creatable=+create, Updatable=+update, Deletable=+delete)
+#   [read, create, update, delete] -> explicit subset (can never exceed what LN declares)
+
+defaults:
+  permissions: max
+
+services:
+  tdapi.slsSalesOrder:
+    description: Sales orders, order lines and actual delivery lines
+    resources:
+      Orders: {}
+      Lines: {}
+      ActualDeliveryLines: {}
+    operations:
+      - CreateOrder
+      - CreateLine
+      - SimulateAdditionalCostLines
+      - CalculateLineAmounts
+
+  tdapi.isaItemSales:
+    description: Item sales data (global and by sales office)
+    resources:
+      ItemsSales: {}
+      ItemsSalesBySalesOffice: {}
+
+  tcapi.comBusinessPartner:
+    description: Business partners and sold-to business partners
+    resources:
+      BusinessPartners: {}
+      SoldtoBusinessPartners: {}
+
+  tcapi.ibdItem:
+    description: Items (general) and items by site
+    resources:
+      Items: {}
+      ItemsBySites: {}
+    operations:
+      - GetSegmentedItemKey
