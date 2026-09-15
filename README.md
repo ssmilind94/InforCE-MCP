@@ -100,6 +100,8 @@ One-time setup:
    Reruns keep `OAUTH_JWT_SECRET`; `--rotate-jwt-secret` invalidates all issued tokens.
 4. **GitHub** (Settings > Secrets and variables > Actions)
    - Variable `AZURE_WEBAPP_NAME` = `<app>`
+   - Variable `AZURE_WEBAPP_URL` = the app's `https://` default domain from the Overview page. New apps can have
+     a unique hostname such as `<app>-<hash>.<region>.azurewebsites.net`; use the same URL for `--app-url`.
    - Secret `AZURE_WEBAPP_PUBLISH_PROFILE` = contents of Portal > Overview > Download publish profile
 5. Push to `main`, or run the workflow manually. Then verify:
    `.venv/bin/python scripts/smoke_test.py --base-url https://<app>.azurewebsites.net --client-id ... --client-secret ... --company <LN company>`

@@ -2,6 +2,7 @@
 #
 # One-time GitHub setup (Settings > Secrets and variables > Actions):
 #   variable AZURE_WEBAPP_NAME             Web App name (deploy is skipped until this is set)
+#   variable AZURE_WEBAPP_URL              Public https URL (default hostnames may carry a unique suffix)
 #   secret   AZURE_WEBAPP_PUBLISH_PROFILE  Portal > Web App > Overview > Download publish profile
 # App Service builds requirements.txt on deploy (App Setting SCM_DO_BUILD_DURING_DEPLOYMENT=true).
 name: test-and-deploy
@@ -48,7 +49,7 @@ jobs:
           package: app.zip
       - name: Health check
         run: |
-          url="https://${{ vars.AZURE_WEBAPP_NAME }}.azurewebsites.net/healthz"
+          url="${{ vars.AZURE_WEBAPP_URL }}/healthz"
           for i in $(seq 1 30); do
             if curl -fsS "$url"; then echo; exit 0; fi
             sleep 10
