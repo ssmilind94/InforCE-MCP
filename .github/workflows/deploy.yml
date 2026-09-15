@@ -1,0 +1,56 @@
+# Test on every push/PR; deploy main to the Azure Web App (Linux, Python) with a publish profile.
+#
+# One-time GitHub setup (Settings > Secrets and variables > Actions):
+#   variable AZURE_WEBAPP_NAME             Web App name (deploy is skipped until this is set)
+#   secret   AZURE_WEBAPP_PUBLISH_PROFILE  Portal > Web App > Overview > Download publish profile
+# App Service builds requirements.txt on deploy (App Setting SCM_DO_BUILD_DURING_DEPLOYMENT=true).
+name: test-and-deploy
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+env:
+  PYTHON_VERSION: "3.14"
+
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: ${{ env.PYTHON_VERSION }}
+          cache: pip
+          cache-dependency-path: requirements*.txt
+      - run: pip install -r requirements-dev.txt
+      - run: python -m pytest -q
+
+  deploy:
+    needs: test
+    if: github.ref == 'refs/heads/main' && github.event_name != 'pull_request' && vars.AZURE_WEBAPP_NAME != ''
+    runs-on: ubuntu-latest
+    environment: production
+    concurrency: production
+    steps:
+      - uses: actions/checkout@v4
+      - name: Package app
+        run: zip -qr app.zip app config/endpoints.yaml requirements.txt -x '**/__pycache__/*'
+      - uses: azure/webapps-deploy@v3
+        with:
+          app-name: ${{ vars.AZURE_WEBAPP_NAME }}
+          publish-profile: ${{ secrets.AZURE_WEBAPP_PUBLISH_PROFILE }}
+          package: app.zip
+      - name: Health check
+        run: |
+          url="https://${{ vars.AZURE_WEBAPP_NAME }}.azurewebsites.net/healthz"
+          for i in $(seq 1 30); do
+            if curl -fsS "$url"; then echo; exit 0; fi
+            sleep 10
+          done
+          echo "health check failed: $url" >&2; exit 1

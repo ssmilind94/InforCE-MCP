@@ -14,4 +14,4 @@ __pycache__/
 output/
 
 # OAuth client registry (hashed secrets, still environment-specific)
-config/clients.json
+config/clients*.json

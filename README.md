@@ -73,6 +73,45 @@ Tests:
 .venv/bin/python scripts/smoke_test.py --client-id ... --client-secret ... --company 1300   # live, read-only
 ```
 
+## Azure deployment (GitHub Actions → Linux Python 3.14 Web App)
+
+`.github/workflows/deploy.yml` runs the tests on every push and PR. On `main` it zip-deploys `app/`,
+`config/endpoints.yaml` and `requirements.txt`; App Service installs the requirements. The workflow then
+polls `/healthz`. The deploy job is skipped until `AZURE_WEBAPP_NAME` is set.
+
+One-time setup:
+
+1. **Web App** (Portal > Settings > Configuration > General settings)
+   - Startup command:
+     `python -m uvicorn app.main:create_app --factory --host 0.0.0.0 --port 8000 --proxy-headers --forwarded-allow-ips="*"`
+   - SCM Basic Auth Publishing Credentials: **On** (needed for the publish profile)
+   - HTTPS Only: **On**. Always On: **On**.
+2. **OAuth clients for Azure.** Keep them separate from local clients; `config/clients*.json` is git-ignored:
+   ```bash
+   .venv/bin/python scripts/manage_clients.py --file config/clients.azure.json create --name "my-client" \
+       [--redirect-uri https://claude.ai/api/mcp/auth_callback]
+   ```
+3. **App Settings:**
+   ```bash
+   .venv/bin/python scripts/make_app_settings.py --app-url https://<app>.azurewebsites.net [--company <LN company>]
+   ```
+   Paste the entries from `output/azure-appsettings.json` into Portal > Settings > Environment variables >
+   Advanced edit, merging with what is already there, then Apply. The file holds secrets and has mode 0600.
+   Reruns keep `OAUTH_JWT_SECRET`; `--rotate-jwt-secret` invalidates all issued tokens.
+4. **GitHub** (Settings > Secrets and variables > Actions)
+   - Variable `AZURE_WEBAPP_NAME` = `<app>`
+   - Secret `AZURE_WEBAPP_PUBLISH_PROFILE` = contents of Portal > Overview > Download publish profile
+5. Push to `main`, or run the workflow manually. Then verify:
+   `.venv/bin/python scripts/smoke_test.py --base-url https://<app>.azurewebsites.net --client-id ... --client-secret ... --company <LN company>`
+
+Adding an API or a client changes something different:
+- New API: edit `config/endpoints.yaml` and push. The deploy restarts the app.
+- New client: rerun steps 2 and 3, then update `OAUTH_CLIENTS_JSON` in the Portal.
+
+Tokens are stateless JWTs, so the app can scale out. One exception: single use of an authorization code is
+enforced per instance, in memory. With several instances, a code could be redeemed once on each instance
+during its 5-minute lifetime. It stays bound to the client secret and PKCE either way.
+
 ## OAuth2
 
 - Metadata: `/.well-known/oauth-authorization-server`, `/.well-known/oauth-protected-resource/mcp`
@@ -86,7 +125,7 @@ Tests:
 
 | Variable | Default | Notes |
 |---|---|---|
-| `IONAPI_JSON` / `IONAPI_FILE` | `Files/InforVelocity.ionapi` | Backend service account `.ionapi`; use `IONAPI_JSON` (Key Vault reference) on Azure |
+| `IONAPI_JSON` / `IONAPI_FILE` | `Files/InforVelocity.ionapi` | Backend service account `.ionapi`; on Azure the file content goes in the `IONAPI_JSON` App Setting |
 | `LN_DEFAULT_COMPANY` | `__LN_COMPANY__` | Default `X-Infor-LnCompany` |
 | `ENDPOINTS_FILE` | `config/endpoints.yaml` | |
 | `PUBLIC_BASE_URL` | `http://localhost:8000` | Public URL; OAuth issuer and token audience |
