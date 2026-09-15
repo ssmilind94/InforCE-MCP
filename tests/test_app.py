@@ -12,6 +12,7 @@ import pytest
 from app.config import Settings
 from app.main import create_app
 from app.security.oauth import hash_secret
+from app.security.static_tokens import generate_token, hash_token
 from tests.conftest import LN_BASE
 
 BASE = "http://localhost:8000"
@@ -23,6 +24,11 @@ TOOLS = {"ln_list_resources", "ln_describe", "ln_query", "ln_get", "ln_create", 
          "ln_call_operation"}
 
 
+STATIC_FULL = generate_token()
+STATIC_RO = generate_token()
+STATIC_EXPIRED = generate_token()
+
+
 @pytest.fixture
 def app(ln):
     entries = [
@@ -30,8 +36,14 @@ def app(ln):
          "scopes": ["ln.read", "ln.write"], "redirect_uris": [REDIRECT]},
         {"client_id": READ_ONLY[0], "secret_hash": hash_secret(READ_ONLY[1], iterations=1000), "scopes": ["ln.read"]},
     ]
+    tokens = [
+        {"token_id": STATIC_FULL[0], "token_hash": hash_token(STATIC_FULL[1]), "scopes": ["ln.read", "ln.write"]},
+        {"token_id": STATIC_RO[0], "token_hash": hash_token(STATIC_RO[1]), "scopes": ["ln.read"]},
+        {"token_id": STATIC_EXPIRED[0], "token_hash": hash_token(STATIC_EXPIRED[1]), "expires_at": 1},
+    ]
     settings = Settings(_env_file=None, oauth_jwt_secret="t" * 40, public_base_url=BASE,
-                        oauth_clients_json=json.dumps(entries), ionapi_file=None)
+                        oauth_clients_json=json.dumps(entries), static_tokens_json=json.dumps(tokens),
+                        ionapi_file=None)
     return create_app(settings, ln_service=ln)
 
 
@@ -149,3 +161,33 @@ async def test_write_tools_require_write_scope(app):
         res = await _mcp(http, token, "tools/call", {"name": "ln_delete", "arguments": {
             "service": "tcapi.ibdItem", "resource": "Items", "key": "X", "company": "1300"}}, id=2)
         assert res["result"]["isError"] and "ln.write" in json.dumps(res["result"])
+
+
+async def test_static_bearer_token(app, infor):
+    infor.get(url__startswith=f"{LN_BASE}/tdapi.slsSalesOrder/Orders").mock(
+        return_value=httpx.Response(200, json={"value": [{"SalesOrder": "100000001"}]}))
+    async with connect(app) as http:
+        token = STATIC_FULL[1]
+        assert (await _initialize(http, token))["result"]["serverInfo"]["name"] == "infor-ln-mcp"
+        tools = await _mcp(http, token, "tools/list", id=2)
+        assert {t["name"] for t in tools["result"]["tools"]} == TOOLS
+        res = await _mcp(http, token, "tools/call", {"name": "ln_query", "arguments": {
+            "service": "tdapi.slsSalesOrder", "resource": "Orders", "select": "SalesOrder", "company": "1300"}}, id=3)
+        assert not res["result"].get("isError") and "100000001" in json.dumps(res["result"])
+
+
+async def test_static_token_scopes_and_rejections(app):
+    async with connect(app) as http:
+        await _initialize(http, STATIC_RO[1])
+        res = await _mcp(http, STATIC_RO[1], "tools/call", {"name": "ln_delete", "arguments": {
+            "service": "tcapi.ibdItem", "resource": "Items", "key": "X", "company": "1300"}}, id=2)
+        assert res["result"]["isError"] and "ln.write" in json.dumps(res["result"])
+
+        body = {"jsonrpc": "2.0", "id": 1, "method": "tools/list"}
+        for bad in (STATIC_EXPIRED[1], STATIC_FULL[1] + "x", generate_token()[1]):
+            r = await http.post("/mcp", headers={**MCP_HEADERS, "Authorization": f"Bearer {bad}"}, json=body)
+            assert r.status_code == 401
+
+        # OAuth2 tokens keep working alongside static tokens
+        oauth_token = (await _token(http, FULL)).json()["access_token"]
+        assert (await _initialize(http, oauth_token))["result"]["serverInfo"]["name"] == "infor-ln-mcp"

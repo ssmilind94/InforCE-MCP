@@ -1,11 +1,13 @@
-"""Live end-to-end smoke test (read-only): OAuth2 token -> MCP client -> every configured LN resource.
+"""Live end-to-end smoke test (read-only): bearer token -> MCP client -> every configured LN resource.
 
   python scripts/smoke_test.py --base-url http://localhost:8000 \
-      --client-id ln-mcp-... --client-secret ... --company 1300
+      --client-id ln-mcp-... --client-secret ... --company 1300          # OAuth2 client_credentials
+  MCP_BEARER_TOKEN=lnmcp_... python scripts/smoke_test.py --base-url ... --company 1300   # static token
 """
 import argparse
 import asyncio
 import json
+import os
 import sys
 
 import httpx
@@ -42,11 +44,15 @@ class Runner:
 
 
 async def run(args) -> int:
-    resp = httpx.post(f"{args.base_url}/oauth/token", data={"grant_type": "client_credentials"},
-                      auth=(args.client_id, args.client_secret), timeout=30)
-    resp.raise_for_status()
-    token = resp.json()["access_token"]
-    print(f"PASS  oauth client_credentials  scope={resp.json()['scope']!r}")
+    if args.token:
+        token = args.token
+        print("INFO  using static bearer token (no OAuth2 exchange)")
+    else:
+        resp = httpx.post(f"{args.base_url}/oauth/token", data={"grant_type": "client_credentials"},
+                          auth=(args.client_id, args.client_secret), timeout=30)
+        resp.raise_for_status()
+        token = resp.json()["access_token"]
+        print(f"PASS  oauth client_credentials  scope={resp.json()['scope']!r}")
 
     headers = {"Authorization": f"Bearer {token}"}
     async with httpx2.AsyncClient(headers=headers, timeout=httpx2.Timeout(180)) as http:
@@ -125,10 +131,15 @@ async def run(args) -> int:
 def main() -> None:
     ap = argparse.ArgumentParser()
     ap.add_argument("--base-url", default="http://localhost:8000")
-    ap.add_argument("--client-id", required=True)
-    ap.add_argument("--client-secret", required=True)
+    ap.add_argument("--client-id")
+    ap.add_argument("--client-secret")
+    ap.add_argument("--token", default=os.environ.get("MCP_BEARER_TOKEN"),
+                    help="Static bearer token (default: $MCP_BEARER_TOKEN); replaces --client-id/--client-secret")
     ap.add_argument("--company", required=True)
-    sys.exit(asyncio.run(run(ap.parse_args())))
+    args = ap.parse_args()
+    if not args.token and not (args.client_id and args.client_secret):
+        ap.error("pass --token (or MCP_BEARER_TOKEN) or both --client-id and --client-secret")
+    sys.exit(asyncio.run(run(args)))
 
 
 if __name__ == "__main__":

@@ -16,9 +16,11 @@ MCP client ──OAuth2 bearer──▶ /mcp (this server) ──service account
 | `app/tools.py` | MCP tools |
 | `app/infor/` | ION API credentials, token cache, HTTP client with retries, `$metadata` parsing, LN operations |
 | `app/security/oauth.py` | OAuth2 authorization server (JWT access/refresh tokens) |
+| `app/security/static_tokens.py` | Static bearer tokens for custom agents |
 | `scripts/check_connectivity.py` | Phase 1 connectivity check |
 | `scripts/discover_ln.py` | Probe LN services and write `discovery/ln_endpoint_inventory.*` |
 | `scripts/manage_clients.py` | Create/list/delete MCP OAuth clients |
+| `scripts/manage_tokens.py` | Create/list/revoke static bearer tokens |
 | `scripts/smoke_test.py` | Live read-only end-to-end test through a real MCP client |
 
 ## MCP tools
@@ -114,6 +116,53 @@ Tokens are stateless JWTs, so the app can scale out. One exception: single use o
 enforced per instance, in memory. With several instances, a code could be redeemed once on each instance
 during its 5-minute lifetime. It stays bound to the client secret and PKCE either way.
 
+## Authentication
+
+`/mcp` accepts two kinds of token in `Authorization: Bearer <token>`:
+
+| Token | For | Obtained |
+|---|---|---|
+| Static token `lnmcp_<id>_<secret>` | Custom agents and scripts with a fixed header | `scripts/manage_tokens.py` |
+| OAuth2 JWT access token | OAuth-capable MCP clients | `POST /oauth/token` (see below) |
+
+Both kinds use the same scopes: `ln.read` for any access, `ln.write` for create, update, delete and actions.
+
+### Static bearer tokens
+
+```bash
+.venv/bin/python scripts/manage_tokens.py --file config/tokens.azure.json create --name "sales-agent" \
+    [--scopes ln.read] [--expires-days 365]      # default: both scopes, 365 days; 0 = never expires
+.venv/bin/python scripts/manage_tokens.py --file config/tokens.azure.json list
+.venv/bin/python scripts/manage_tokens.py --file config/tokens.azure.json revoke <token_id>
+```
+
+- Each token is shown once. Only its SHA-256 hash is stored.
+- Locally the server reads `config/tokens.json`. On Azure, rerun `scripts/make_app_settings.py` and apply the
+  `STATIC_TOKENS_JSON` setting. Changing the setting restarts the app, and that's when creating or revoking a
+  token takes effect.
+
+Custom agent example (Python MCP SDK):
+
+```python
+import os
+
+import httpx2
+from mcp import ClientSession
+from mcp.client.streamable_http import streamable_http_client
+
+headers = {"Authorization": f"Bearer {os.environ['MCP_BEARER_TOKEN']}"}
+async with httpx2.AsyncClient(headers=headers, timeout=180) as http:
+    async with streamable_http_client("https://<app host>/mcp", http_client=http) as (read, write):
+        async with ClientSession(read, write) as session:
+            await session.initialize()
+            result = await session.call_tool("ln_query", {
+                "service": "tcapi.ibdItem", "resource": "Items", "select": "Item,Description", "top": 5,
+                "company": "1300"})
+```
+
+Keep tokens in a secret store or environment variable, not in source code. Use a separate token for each
+agent so you can revoke one without affecting the others.
+
 ## OAuth2
 
 - Metadata: `/.well-known/oauth-authorization-server`, `/.well-known/oauth-protected-resource/mcp`
@@ -134,6 +183,7 @@ during its 5-minute lifetime. It stays bound to the client secret and PKCE eithe
 | `ALLOWED_HOSTS` | `[]` | Extra accepted Host headers (JSON list) |
 | `OAUTH_JWT_SECRET` | (required) | At least 32 characters |
 | `OAUTH_CLIENTS_JSON` / `OAUTH_CLIENTS_FILE` | `config/clients.json` | Client registry |
+| `STATIC_TOKENS_JSON` / `STATIC_TOKENS_FILE` | `config/tokens.json` | Static bearer token registry (hashes) |
 | `OAUTH_ACCESS_TOKEN_TTL` / `OAUTH_REFRESH_TOKEN_TTL` | 3600 / 2592000 | Seconds |
 | `INFOR_MAX_RETRIES`, `INFOR_TIMEOUT_SECONDS`, `QUERY_MAX_TOP` | 3, 60, 500 | |
 

@@ -2,7 +2,8 @@
 
   python scripts/make_app_settings.py --app-url https://<app>.azurewebsites.net \
       [--ionapi Files/InforVelocity.ionapi] [--clients config/clients.azure.json] \
-      [--company __LN_COMPANY__] [--out output/azure-appsettings.json] [--rotate-jwt-secret]
+      [--tokens config/tokens.azure.json] [--company __LN_COMPANY__] [--out output/azure-appsettings.json] \
+      [--rotate-jwt-secret]
 
 The output contains secrets: it is written with mode 0600 under output/ (git-ignored).
 An existing OAUTH_JWT_SECRET in the output file is reused so issued tokens stay valid,
@@ -19,6 +20,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 from app.config import COMPANY_PLACEHOLDER  # noqa: E402
 from app.infor.ionapi import IonApiCredentials  # noqa: E402
 from app.security.oauth import ClientStore  # noqa: E402
+from app.security.static_tokens import StaticTokenVerifier  # noqa: E402
 
 
 def main() -> None:
@@ -27,6 +29,8 @@ def main() -> None:
     ap.add_argument("--ionapi", type=Path, default=Path("Files/InforVelocity.ionapi"))
     ap.add_argument("--clients", type=Path, default=Path("config/clients.azure.json"),
                     help="Client registry for Azure (create with manage_clients.py --file ...)")
+    ap.add_argument("--tokens", type=Path, default=Path("config/tokens.azure.json"),
+                    help="Static bearer tokens for Azure (create with manage_tokens.py --file ...); optional")
     ap.add_argument("--company", default=COMPANY_PLACEHOLDER)
     ap.add_argument("--out", type=Path, default=Path("output/azure-appsettings.json"))
     ap.add_argument("--rotate-jwt-secret", action="store_true")
@@ -58,6 +62,10 @@ def main() -> None:
         "OAUTH_JWT_SECRET": jwt_secret or secrets.token_urlsafe(48),
         "OAUTH_CLIENTS_JSON": json.dumps(clients, separators=(",", ":")),
     }
+    tokens = json.loads(args.tokens.read_text()) if args.tokens.exists() else []
+    if tokens:
+        StaticTokenVerifier.from_entries(tokens)  # validate before shipping
+        settings["STATIC_TOKENS_JSON"] = json.dumps(tokens, separators=(",", ":"))
 
     args.out.parent.mkdir(parents=True, exist_ok=True)
     fd = os.open(args.out, os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600)
@@ -65,7 +73,8 @@ def main() -> None:
         json.dump([{"name": k, "value": v, "slotSetting": False} for k, v in settings.items()], f, indent=2)
         f.write("\n")
     os.chmod(args.out, 0o600)
-    print(f"wrote {args.out} ({len(settings)} settings, {len(clients)} client(s), company={args.company})")
+    print(f"wrote {args.out} ({len(settings)} settings, {len(clients)} client(s), {len(tokens)} static token(s), "
+          f"company={args.company})")
     print("Portal: Web App > Settings > Environment variables > Advanced edit: merge these entries, then Apply.")
 
 

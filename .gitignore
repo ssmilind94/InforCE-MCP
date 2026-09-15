@@ -15,3 +15,6 @@ output/
 
 # OAuth client registry (hashed secrets, still environment-specific)
 config/clients*.json
+
+# Static MCP bearer token registries (token hashes)
+config/tokens*.json

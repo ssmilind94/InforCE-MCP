@@ -20,6 +20,7 @@ from app.infor.ionapi import load_credentials
 from app.infor.ln_service import LNService
 from app.infor.token_manager import InforTokenManager
 from app.security.oauth import ClientStore, JWTTokenVerifier, OAuthServer, TokenIssuer
+from app.security.static_tokens import ChainedTokenVerifier, StaticTokenVerifier
 from app.tools import READ_SCOPE, register_tools
 
 INSTRUCTIONS = """Tools for Infor LN (ERP) through the Infor ION API.
@@ -45,12 +46,15 @@ def create_app(settings: Settings | None = None, ln_service: LNService | None = 
                          access_ttl=settings.oauth_access_token_ttl, refresh_ttl=settings.oauth_refresh_token_ttl)
     clients = ClientStore.load(settings.oauth_clients_json, settings.oauth_clients_file)
     oauth = OAuthServer(clients, issuer, settings.base_url)
+    static_tokens = StaticTokenVerifier.load(settings.static_tokens_json, settings.static_tokens_file,
+                                             audience=settings.mcp_resource_url)
 
     mcp = MCPServer(
         name="infor-ln-mcp",
         version=__version__,
         instructions=INSTRUCTIONS,
-        token_verifier=JWTTokenVerifier(issuer),
+        # Bearer tokens: static tokens (lnmcp_...) for custom agents, or OAuth2 JWT access tokens
+        token_verifier=ChainedTokenVerifier(static_tokens, JWTTokenVerifier(issuer)),
         auth=AuthSettings(
             issuer_url=settings.base_url,
             resource_server_url=settings.mcp_resource_url,

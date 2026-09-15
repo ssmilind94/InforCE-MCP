@@ -14,7 +14,7 @@ class Settings(BaseSettings):
 
     # --- Infor ION API ---
     ionapi_file: Path | None = Path("Files/InforVelocity.ionapi")
-    ionapi_json: str | None = None  # full .ionapi content; takes precedence (use a Key Vault reference on Azure)
+    ionapi_json: str | None = None  # full .ionapi content; takes precedence (App Setting on Azure)
     ln_default_company: str = COMPANY_PLACEHOLDER
     endpoints_file: Path = Path("config/endpoints.yaml")
     metadata_snapshot_dir: Path | None = None  # optional offline $metadata snapshots (<service>.json)
@@ -30,6 +30,8 @@ class Settings(BaseSettings):
     oauth_refresh_token_ttl: int = 30 * 24 * 3600
     oauth_clients_json: str | None = None  # JSON list of clients; takes precedence over the file
     oauth_clients_file: Path | None = Path("config/clients.json")
+    static_tokens_json: str | None = None  # JSON list of static bearer tokens; takes precedence over the file
+    static_tokens_file: Path | None = Path("config/tokens.json")
 
     @property
     def base_url(self) -> str:
